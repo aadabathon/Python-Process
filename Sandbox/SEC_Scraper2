@@ -1,0 +1,57 @@
+import requests, time, json, pandas as pd
+
+UA = "YourAppName/1.0 (your_email@example.com)"
+BASE = "https://data.sec.gov"
+def pad_cik(cik): return str(cik).zfill(10)
+def get_json(url, params=None):
+    r = requests.get(url, headers={"User-Agent": UA}, params=params, timeout=30)
+    if r.status_code==429: time.sleep(1.2); r = requests.get(url, headers={"User-Agent": UA}, params=params, timeout=30)
+    r.raise_for_status(); return r.json()
+
+def get_submissions(cik):
+    url = f"{BASE}/submissions/CIK{pad_cik(cik)}.json"
+    return get_json(url)
+
+def get_companyfacts(cik):
+    url = f"{BASE}/api/xbrl/companyfacts/CIK{pad_cik(cik)}.json"
+    return get_json(url)
+
+def latest_filings_table(sub):
+    filings = sub.get("filings",{}).get("recent",{})
+    df = pd.DataFrame(filings)
+    cols = ["accessionNumber","filingDate","reportDate","form","primaryDocDescription","primaryDocument"]
+    return df[cols]
+
+def extract_fact_series(facts, taxonomy, concept):
+    node = facts.get("facts",{}).get(taxonomy,{}).get(concept,{})
+    units = node.get("units",{})
+    if not units: return pd.DataFrame()
+    k = next(iter(units.keys()))
+    df = pd.DataFrame(units[k])
+    if "fy" in df.columns and "fp" in df.columns and "val" in df.columns:
+        df = df[["end","fy","fp","val"]].drop_duplicates().sort_values("end")
+    return df
+
+def collect_core_facts(cik):
+    cf = get_companyfacts(cik)
+    keys = [("us-gaap","Revenues"),("us-gaap","SalesRevenueNet"),("us-gaap","NetIncomeLoss"),("us-gaap","CashProvidedByUsedInOperatingActivities"),("us-gaap","Assets"),("us-gaap","Liabilities"),("us-gaap","StockholdersEquity"),("us-gaap","WeightedAverageNumberOfDilutedSharesOutstanding")]
+    frames = {}
+    for tax,concept in keys:
+        d = extract_fact_series(cf, tax, concept)
+        if len(d): frames[concept]=d.rename(columns={"val":concept})
+        time.sleep(0.12)
+    out = None
+    for k,df in frames.items():
+        out = df if out is None else out.merge(df, on=["end","fy","fp"], how="outer")
+    return out
+
+def scrape_company(cik):
+    sub = get_submissions(cik)
+    tbl = latest_filings_table(sub)
+    facts = collect_core_facts(cik)
+    return tbl, facts
+
+# example: Apple CIK 0000320193
+filings, facts = scrape_company("320193")
+facts = facts.sort_values("end")
+filings.head(), facts.tail()
